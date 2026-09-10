@@ -1,9 +1,6 @@
+/** Tests node-host exec policy evaluation and approval decisions. */
 import { describe, expect, it } from "vitest";
-import {
-  evaluateSystemRunPolicy,
-  formatSystemRunAllowlistMissMessage,
-  resolveExecApprovalDecision,
-} from "./exec-policy.js";
+import { evaluateSystemRunPolicy, resolveExecApprovalDecision } from "./exec-policy.js";
 
 type EvaluatePolicyParams = Parameters<typeof evaluateSystemRunPolicy>[0];
 type EvaluatePolicyDecision = ReturnType<typeof evaluateSystemRunPolicy>;
@@ -48,29 +45,6 @@ describe("resolveExecApprovalDecision", () => {
   it("normalizes unknown approval decisions to null", () => {
     expect(resolveExecApprovalDecision("deny")).toBeNull();
     expect(resolveExecApprovalDecision(undefined)).toBeNull();
-  });
-});
-
-describe("formatSystemRunAllowlistMissMessage", () => {
-  it("returns legacy allowlist miss message by default", () => {
-    expect(formatSystemRunAllowlistMissMessage()).toBe("SYSTEM_RUN_DENIED: allowlist miss");
-  });
-
-  it("adds shell-wrapper guidance when wrappers are blocked", () => {
-    expect(
-      formatSystemRunAllowlistMissMessage({
-        shellWrapperBlocked: true,
-      }),
-    ).toContain("shell wrappers like sh/bash/zsh -c require approval");
-  });
-
-  it("adds Windows shell-wrapper guidance when blocked by cmd.exe policy", () => {
-    expect(
-      formatSystemRunAllowlistMissMessage({
-        shellWrapperBlocked: true,
-        windowsShellWrapperBlocked: true,
-      }),
-    ).toContain("Windows shell wrappers like cmd.exe /c require approval");
   });
 });
 
@@ -145,6 +119,16 @@ describe("evaluateSystemRunPolicy", () => {
     expect(denied.shellWrapperBlocked).toBe(true);
     expect(denied.windowsShellWrapperBlocked).toBe(true);
     expect(denied.errorMessage).toContain("Windows shell wrappers like cmd.exe /c");
+  });
+
+  it("does not block Windows cmd.exe invocations without inline shell-wrapper transport", () => {
+    const allowed = expectAllowedDecision(
+      evaluateSystemRunPolicy(
+        buildPolicyParams({ isWindows: true, cmdInvocation: true, shellWrapperInvocation: false }),
+      ),
+    );
+    expect(allowed.shellWrapperBlocked).toBe(false);
+    expect(allowed.windowsShellWrapperBlocked).toBe(false);
   });
 
   it("allows execution when policy checks pass", () => {

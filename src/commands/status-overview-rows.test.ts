@@ -1,162 +1,320 @@
+// Status overview row tests cover status-all overview values, update metadata, and display rows.
 import { describe, expect, it } from "vitest";
+import { VERSION } from "../version.js";
 import {
   buildStatusAllOverviewRows,
   buildStatusCommandOverviewRows,
 } from "./status-overview-rows.ts";
+import {
+  baseStatusOverviewSurface,
+  createStatusCommandOverviewRowsParams,
+} from "./status.test-support.ts";
+
+function findRowValue(rows: Array<{ Item: string; Value: string }>, item: string) {
+  return rows.find((row) => row.Item === item)?.Value;
+}
 
 describe("status-overview-rows", () => {
+  it.each(["default", "all"])("preserves service inspection failures in %s output", (mode) => {
+    const params = createStatusCommandOverviewRowsParams();
+    const service = {
+      label: "LaunchAgent",
+      installed: false,
+      loadedText: "unknown",
+      loadState: { status: "unknown" as const, detail: "permission denied token=fixture" },
+    };
+    const surface = {
+      ...params.surface,
+      gatewayService: service,
+      nodeService: {
+        ...service,
+        loadedText: "not loaded",
+        loadState: { status: "not-loaded" as const },
+        runtime: { status: "unknown", detail: "system domain permission denied token=fixture" },
+      },
+    };
+    const rows =
+      mode === "default"
+        ? buildStatusCommandOverviewRows({ ...params, surface })
+        : buildStatusAllOverviewRows({
+            ...params,
+            surface,
+            configPath: "/tmp/openclaw.json",
+            secretDiagnosticsCount: 0,
+          });
+
+    expect(findRowValue(rows, "Gateway service")).toBe(
+      "LaunchAgent unknown (inspection failed: permission denied token=***)",
+    );
+    expect(findRowValue(rows, "Node service")).toBe(
+      "LaunchAgent not loaded (inspection failed: system domain permission denied token=***) · unknown",
+    );
+  });
+
   it("builds command overview rows from the shared surface", () => {
-    expect(
-      buildStatusCommandOverviewRows({
-        opts: { deep: true },
+    const rows = buildStatusCommandOverviewRows(createStatusCommandOverviewRowsParams());
+
+    expect(findRowValue(rows, "OS")).toBe(`macOS · node ${process.versions.node}`);
+    expect(findRowValue(rows, "Memory")).toBe(
+      "1 files · 2 chunks · plugin memory · ok(vector ready) · warn(fts ready) · muted(cache warm)",
+    );
+    expect(findRowValue(rows, "Plugin compatibility")).toBe("warn(1 notice · 1 plugin)");
+    expect(findRowValue(rows, "Telemetry")).toBe("muted(disabled · update checks only)");
+    expect(findRowValue(rows, "Host desktop")).toBe("muted(disabled)");
+    expect(findRowValue(rows, "Sessions")).toBe(
+      "2 active · default gpt-5.5 (12k ctx) · store.json",
+    );
+  });
+
+  it.each([
+    {
+      label: "explicitly enabled",
+      telemetry: { enabled: true },
+      doNotTrack: undefined,
+      noAutoUpdate: undefined,
+      checkOnStart: true,
+      expected: "ok(enabled · anonymous feature stats)",
+    },
+    {
+      label: "blocked by DO_NOT_TRACK",
+      telemetry: { enabled: true },
+      doNotTrack: "1",
+      noAutoUpdate: undefined,
+      checkOnStart: true,
+      expected: "muted(disabled (DO_NOT_TRACK))",
+    },
+    {
+      label: "blocked by a trimmed DO_NOT_TRACK value",
+      telemetry: { enabled: true },
+      doNotTrack: " TRUE ",
+      noAutoUpdate: undefined,
+      checkOnStart: true,
+      expected: "muted(disabled (DO_NOT_TRACK))",
+    },
+    {
+      label: "update checks disabled",
+      telemetry: { enabled: true },
+      doNotTrack: undefined,
+      noAutoUpdate: undefined,
+      checkOnStart: false,
+      expected: "muted(disabled · update checks off)",
+    },
+    {
+      label: "update checks disabled by OPENCLAW_NO_AUTO_UPDATE=yes",
+      telemetry: { enabled: true },
+      doNotTrack: undefined,
+      noAutoUpdate: "yes",
+      checkOnStart: true,
+      expected: "muted(disabled · update checks off)",
+    },
+    {
+      label: "update checks disabled by a trimmed OPENCLAW_NO_AUTO_UPDATE=on",
+      telemetry: { enabled: true },
+      doNotTrack: undefined,
+      noAutoUpdate: " on ",
+      checkOnStart: true,
+      expected: "muted(disabled · update checks off)",
+    },
+  ])(
+    "shows telemetry state when $label",
+    ({ telemetry, doNotTrack, noAutoUpdate, checkOnStart, expected }) => {
+      const params = createStatusCommandOverviewRowsParams();
+      const rows = buildStatusCommandOverviewRows({
+        ...params,
+        env: {
+          ...params.env,
+          DO_NOT_TRACK: doNotTrack,
+          OPENCLAW_NO_AUTO_UPDATE: noAutoUpdate,
+        },
         surface: {
-          cfg: { update: { channel: "stable" }, gateway: { bind: "loopback" } },
-          update: {
-            installKind: "git",
-            git: {
-              branch: "main",
-              tag: "v1.2.3",
-              upstream: "origin/main",
-              behind: 2,
-              ahead: 0,
-              dirty: false,
-              fetchOk: true,
-            },
-            registry: { latestVersion: "2026.4.10" },
-          } as never,
-          tailscaleMode: "serve",
-          tailscaleDns: "box.tail.ts.net",
-          tailscaleHttpsUrl: "https://box.tail.ts.net",
-          gatewayMode: "remote",
-          remoteUrlMissing: false,
-          gatewayConnection: { url: "wss://gateway.example.com", urlSource: "config" },
-          gatewayReachable: true,
-          gatewayProbe: { connectLatencyMs: 42, error: null },
-          gatewayProbeAuth: { token: "tok" },
-          gatewayProbeAuthWarning: "warn-text",
-          gatewaySelf: { host: "gateway", version: "1.2.3" },
-          gatewayService: {
-            label: "LaunchAgent",
-            installed: true,
-            managedByOpenClaw: true,
-            loadedText: "loaded",
-            runtimeShort: "running",
-          },
-          nodeService: {
-            label: "node",
-            installed: true,
-            loadedText: "loaded",
-            runtime: { status: "running", pid: 42 },
-          },
-          nodeOnlyGateway: null,
+          ...params.surface,
+          cfg: { ...params.surface.cfg, telemetry, update: { checkOnStart } },
         },
-        osLabel: "macOS",
+      });
+
+      expect(findRowValue(rows, "Telemetry")).toBe(expected);
+    },
+  );
+
+  it("reports automatic update checks as disabled for Nix-managed installations", () => {
+    const params = createStatusCommandOverviewRowsParams();
+    const rows = buildStatusCommandOverviewRows({
+      ...params,
+      env: { ...params.env, OPENCLAW_NIX_MODE: "1" },
+      surface: {
+        ...params.surface,
+        cfg: { ...params.surface.cfg, telemetry: { enabled: true } },
+      },
+    });
+
+    expect(findRowValue(rows, "Telemetry")).toBe("muted(disabled · update checks off)");
+  });
+
+  it("marks skipped memory inspection as not checked in fast status output", () => {
+    const rows = buildStatusCommandOverviewRows(
+      createStatusCommandOverviewRowsParams({
+        memory: null,
+        memoryPlugin: { enabled: true, slot: "memory-lancedb-pro" },
+      }),
+    );
+
+    expect(findRowValue(rows, "Memory")).toBe(
+      "muted(enabled (plugin memory-lancedb-pro) · not checked)",
+    );
+  });
+
+  it("shows managed host desktop coordinates", () => {
+    const params = createStatusCommandOverviewRowsParams();
+    const rows = buildStatusCommandOverviewRows({
+      ...params,
+      summary: {
+        ...params.summary,
+        hostDesktop: {
+          enabled: true,
+          state: "managed",
+          managedState: "running",
+          display: 99,
+          port: 46_001,
+          security: "VncAuth",
+        },
+      },
+    });
+
+    expect(findRowValue(rows, "Host desktop")).toBe(
+      "managed · running · display :99 · 127.0.0.1:46001 · security VncAuth",
+    );
+  });
+
+  it("shows update restart state in fast status output", () => {
+    const rows = buildStatusCommandOverviewRows(
+      createStatusCommandOverviewRowsParams({
+        updateRows: [{ Item: "Update restart", Value: "failed · managed-service-handoff-failed" }],
+      }),
+    );
+
+    expect(findRowValue(rows, "Update restart")).toBe("failed · managed-service-handoff-failed");
+  });
+
+  it("lists plugins quarantined as configured-unavailable", () => {
+    const rows = buildStatusCommandOverviewRows(
+      createStatusCommandOverviewRowsParams({
         summary: {
-          tasks: { total: 3, active: 1, failures: 0, byStatus: { queued: 1, running: 1 } },
-          taskAudit: { errors: 1, warnings: 0 },
-          heartbeat: {
-            agents: [{ agentId: "main", enabled: true, everyMs: 60_000, every: "1m" }],
-          },
-          queuedSystemEvents: ["one", "two"],
-          sessions: {
-            count: 2,
-            paths: ["store.json"],
-            defaults: { model: "gpt-5.4", contextTokens: 12_000 },
-          },
+          ...createStatusCommandOverviewRowsParams().summary,
+          degradedPlugins: [
+            {
+              pluginId: "discord",
+              state: "configured-unavailable",
+              diagnostic: {
+                kind: "plugin-verification",
+                reason: "unreadable-package-json",
+                detail: "permission denied",
+              },
+            },
+          ],
         },
-        health: { durationMs: 42 },
-        lastHeartbeat: {
-          ts: Date.now() - 30_000,
-          status: "ok",
-          channel: "discord",
-          accountId: "acct",
-        },
-        agentStatus: {
-          defaultId: "main",
-          bootstrapPendingCount: 1,
-          totalSessions: 2,
-          agents: [{ id: "main", lastActiveAgeMs: 60_000 }],
-        },
-        memory: { files: 1, chunks: 2, vector: {}, fts: {}, cache: {} },
-        memoryPlugin: { enabled: true, slot: "memory" },
-        pluginCompatibility: [{ pluginId: "a", severity: "warn", message: "legacy" }],
-        ok: (value: string) => `ok(${value})`,
-        warn: (value: string) => `warn(${value})`,
-        muted: (value: string) => `muted(${value})`,
-        formatTimeAgo: (value: number) => `${value}ms`,
-        formatKTokens: (value: number) => `${Math.round(value / 1000)}k`,
-        resolveMemoryVectorState: () => ({ state: "ready", tone: "ok" }),
-        resolveMemoryFtsState: () => ({ state: "ready", tone: "warn" }),
-        resolveMemoryCacheSummary: () => ({ text: "cache warm", tone: "muted" }),
-        updateValue: "available · custom update",
-      } as unknown as Parameters<typeof buildStatusCommandOverviewRows>[0]),
-    ).toEqual(
-      expect.arrayContaining([
-        { Item: "OS", Value: `macOS · node ${process.versions.node}` },
-        {
-          Item: "Memory",
-          Value:
-            "1 files · 2 chunks · plugin memory · ok(vector ready) · warn(fts ready) · muted(cache warm)",
-        },
-        { Item: "Plugin compatibility", Value: "warn(1 notice · 1 plugin)" },
-        { Item: "Sessions", Value: "2 active · default gpt-5.4 (12k ctx) · store.json" },
-      ]),
+      }),
+    );
+
+    expect(findRowValue(rows, "Degraded plugins")).toBe("warn(1 configured-unavailable · discord)");
+  });
+
+  it.each(["default", "all"])("surfaces startup migration warnings in %s output", (mode) => {
+    const params = createStatusCommandOverviewRowsParams();
+    params.summary.startupMigrationWarning = "Retained legacy state. Run openclaw doctor --fix.";
+    const rows =
+      mode === "default"
+        ? buildStatusCommandOverviewRows(params)
+        : buildStatusAllOverviewRows({
+            ...params,
+            configPath: "/tmp/openclaw.json",
+            secretDiagnosticsCount: 0,
+          });
+    expect(findRowValue(rows, "Startup migrations")).toContain(
+      params.summary.startupMigrationWarning,
     );
   });
 
   it("builds status-all overview rows from the shared surface", () => {
-    expect(
-      buildStatusAllOverviewRows({
-        surface: {
-          cfg: { update: { channel: "stable" }, gateway: { bind: "loopback" } },
-          update: {
-            installKind: "git",
-            git: { branch: "main", tag: "v1.2.3", upstream: "origin/main" },
-          } as never,
-          tailscaleMode: "off",
-          tailscaleDns: "box.tail.ts.net",
-          tailscaleHttpsUrl: null,
-          gatewayMode: "remote",
-          remoteUrlMissing: false,
-          gatewayConnection: { url: "wss://gateway.example.com", urlSource: "config" },
-          gatewayReachable: true,
-          gatewayProbe: { connectLatencyMs: 42, error: null },
-          gatewayProbeAuth: { token: "tok" },
-          gatewayProbeAuthWarning: "warn-text",
-          gatewaySelf: { host: "gateway", version: "1.2.3" },
-          gatewayService: {
-            label: "LaunchAgent",
-            installed: true,
-            managedByOpenClaw: true,
-            loadedText: "loaded",
-            runtimeShort: "running",
-          },
-          nodeService: {
-            label: "node",
-            installed: true,
-            loadedText: "loaded",
-            runtime: { status: "running", pid: 42 },
-          },
-          nodeOnlyGateway: null,
+    const summary = createStatusCommandOverviewRowsParams().summary;
+    const rows = buildStatusAllOverviewRows({
+      surface: {
+        ...baseStatusOverviewSurface,
+        tailscaleMode: "off",
+        tailscaleHttpsUrl: null,
+        gatewayConnection: { url: "wss://gateway.example.com", urlSource: "config" },
+      },
+      summary: {
+        ...summary,
+        secretEgressProxy: {
+          state: "degraded",
+          caExpiresAt: "2036-09-01T00:00:00.000Z",
+          failedCertificates: 1,
+          message: "Check OpenSSL, then retry the request.",
         },
-        osLabel: "macOS",
-        configPath: "/tmp/openclaw.json",
-        secretDiagnosticsCount: 2,
-        agentStatus: {
-          bootstrapPendingCount: 1,
-          totalSessions: 2,
-          agents: [{ id: "main", lastActiveAgeMs: 60_000 }],
-        },
-        tailscaleBackendState: "Running",
-      } as unknown as Parameters<typeof buildStatusAllOverviewRows>[0]),
-    ).toEqual(
-      expect.arrayContaining([
-        { Item: "Version", Value: expect.any(String) },
-        { Item: "OS", Value: "macOS" },
-        { Item: "Config", Value: "/tmp/openclaw.json" },
-        { Item: "Security", Value: "Run: openclaw security audit --deep" },
-        { Item: "Secrets", Value: "2 diagnostics" },
-      ]),
+        degradedSecretOwners: [
+          {
+            ownerKind: "capability",
+            ownerId: "tts",
+            state: "unavailable",
+            paths: ["tts.providers.elevenlabs.apiKey"],
+            reason: "secret reference was not found",
+          },
+        ],
+        degradedPlugins: [
+          {
+            pluginId: "discord",
+            state: "configured-unavailable",
+            diagnostic: {
+              kind: "plugin-verification",
+              reason: "unreadable-package-json",
+              detail: "permission denied",
+            },
+          },
+        ],
+      },
+      osLabel: "macOS",
+      configPath: "/tmp/openclaw.json",
+      secretDiagnosticsCount: 2,
+      updateRows: [{ Item: "Update restart", Value: "restart pending health verification" }],
+      agentStatus: {
+        bootstrapPendingCount: 1,
+        totalSessions: 2,
+        agents: [{ id: "main", lastActiveAgeMs: 60_000 }],
+      },
+      tailscaleBackendState: "Running",
+    });
+
+    expect(findRowValue(rows, "Version")).toBe(VERSION);
+    expect(findRowValue(rows, "OS")).toBe("macOS");
+    expect(findRowValue(rows, "Config")).toBe("/tmp/openclaw.json");
+    expect(findRowValue(rows, "Gateway self")).toBe("gateway app 1.2.3");
+    expect(findRowValue(rows, "Update")).toContain("behind 2");
+    expect(findRowValue(rows, "Update restart")).toBe("restart pending health verification");
+    expect(findRowValue(rows, "Security")).toBe("Run: openclaw security audit --deep");
+    expect(findRowValue(rows, "Secret egress proxy")).toBe(
+      "Check OpenSSL, then retry the request.",
     );
+    expect(findRowValue(rows, "Degraded secrets")).toBe("1 degraded · capability:tts");
+    expect(findRowValue(rows, "Degraded plugins")).toBe("1 configured-unavailable · discord");
+    expect(findRowValue(rows, "Secrets")).toBe("2 diagnostics");
   });
+
+  it.each([null, {}])(
+    "uses unknown only when Gateway self metadata is absent (%j)",
+    (gatewaySelf) => {
+      const params = createStatusCommandOverviewRowsParams();
+      const surface = { ...params.surface, gatewaySelf };
+      const rows = buildStatusAllOverviewRows({
+        ...params,
+        surface,
+        configPath: "/tmp/openclaw.json",
+        secretDiagnosticsCount: 0,
+      });
+
+      expect(findRowValue(rows, "Gateway self")).toBe("unknown");
+      expect(
+        findRowValue(buildStatusCommandOverviewRows({ ...params, surface }), "Gateway self"),
+      ).toBeUndefined();
+    },
+  );
 });

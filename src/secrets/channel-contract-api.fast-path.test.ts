@@ -1,72 +1,83 @@
-import { basename } from "node:path";
+/** Tests fast-path secret collection for channel contract API credentials. */
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createPluginMetadataSnapshotFixture } from "../plugins/plugin-metadata.test-support.js";
 
-const { loadPluginManifestRegistryMock } = vi.hoisted(() => ({
-  loadPluginManifestRegistryMock: vi.fn(() => {
-    throw new Error("manifest registry should stay off the explicit bundled channel fast path");
-  }),
+const { loadPluginMetadataSnapshotMock } = vi.hoisted(() => ({
+  loadPluginMetadataSnapshotMock: vi.fn((_params: unknown) => ({ plugins: [] })),
+}));
+const { loadBundledPublicArtifactMock } = vi.hoisted(() => ({
+  loadBundledPublicArtifactMock: vi.fn(
+    ({ artifactCandidates, dirName }: { artifactCandidates: string[]; dirName: string }) => {
+      if (dirName === "discord" && artifactCandidates[0] === "secret-contract-api.js") {
+        return {
+          collectRuntimeConfigAssignments: () => undefined,
+          secretTargetRegistryEntries: [
+            {
+              id: "channels.discord.accounts.*.token",
+              type: "channel",
+              path: "channels.discord.accounts.*.token",
+            },
+          ],
+        };
+      }
+      return null;
+    },
+  ),
 }));
 
-vi.mock("../plugins/manifest-registry.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../plugins/manifest-registry.js")>();
-  return {
-    ...actual,
-    loadPluginManifestRegistry: loadPluginManifestRegistryMock,
-  };
-});
+vi.mock("../plugins/plugin-metadata-snapshot.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../plugins/plugin-metadata-snapshot.js")>()),
+  loadPluginMetadataSnapshot: (params: unknown) =>
+    createPluginMetadataSnapshotFixture(loadPluginMetadataSnapshotMock(params)),
+  resolvePluginMetadataSnapshot: (params: unknown) => {
+    const snapshot = loadPluginMetadataSnapshotMock(params);
+    return createPluginMetadataSnapshotFixture({ plugins: snapshot.plugins });
+  },
+}));
 
-import {
-  loadBundledChannelSecretContractApi,
-  loadBundledChannelSecurityContractApi,
-} from "./channel-contract-api.js";
+vi.mock("../plugins/public-surface-loader.js", () => ({
+  loadBundledPluginPublicArtifactModuleFromCandidatesSync: loadBundledPublicArtifactMock,
+}));
+
+import { loadChannelSecretContractApi } from "./channel-contract-api.js";
 
 describe("channel contract api explicit fast path", () => {
   beforeEach(() => {
-    loadPluginManifestRegistryMock.mockClear();
+    loadPluginMetadataSnapshotMock.mockClear();
   });
 
   it("resolves bundled channel secret contracts by explicit channel id without manifest scans", () => {
-    const api = loadBundledChannelSecretContractApi("bluebubbles");
+    const api = loadChannelSecretContractApi({ channelId: "discord", config: {} });
 
     expect(api?.collectRuntimeConfigAssignments).toBeTypeOf("function");
-    expect(api?.secretTargetRegistryEntries).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          id: "channels.bluebubbles.accounts.*.password",
-        }),
-      ]),
+    expect(loadBundledPublicArtifactMock).toHaveBeenCalledWith({
+      dirName: "discord",
+      artifactCandidates: ["secret-contract-api.js"],
+    });
+    const tokenEntry = api?.secretTargetRegistryEntries?.find(
+      (entry) => entry.id === "channels.discord.accounts.*.token",
     );
-    expect(loadPluginManifestRegistryMock).not.toHaveBeenCalled();
+    expect(tokenEntry?.id).toBe("channels.discord.accounts.*.token");
+    expect(loadPluginMetadataSnapshotMock).not.toHaveBeenCalled();
   });
 
-  it("resolves bundled channel security contracts by explicit channel id without manifest scans", () => {
-    const api = loadBundledChannelSecurityContractApi("whatsapp");
+  it("does not fall back to the broad contract-api artifact when the secret artifact is missing", () => {
+    const api = loadChannelSecretContractApi({ channelId: "missing", config: {} });
 
-    expect(api?.unsupportedSecretRefSurfacePatterns).toEqual(
-      expect.arrayContaining(["channels.whatsapp.creds.json"]),
-    );
-    expect(api?.collectUnsupportedSecretRefConfigCandidates).toBeTypeOf("function");
-    expect(loadPluginManifestRegistryMock).not.toHaveBeenCalled();
-  });
-
-  it("keeps bundled channel ids aligned with their plugin directories", async () => {
-    const { loadPluginManifestRegistry } = await vi.importActual<
-      typeof import("../plugins/manifest-registry.js")
-    >("../plugins/manifest-registry.js");
-
-    const mismatches = loadPluginManifestRegistry({})
-      .plugins.filter((record) => record.origin === "bundled")
-      .filter((record) => typeof record.rootDir === "string" && record.rootDir.trim().length > 0)
-      .flatMap((record) =>
-        record.channels
-          .filter((channelId) => channelId !== basename(record.rootDir))
-          .map((channelId) => ({
-            id: record.id,
-            channelId,
-            dirName: basename(record.rootDir),
-          })),
-      );
-
-    expect(mismatches).toEqual([]);
+    expect(api).toBeUndefined();
+    expect(loadBundledPublicArtifactMock).toHaveBeenCalledWith({
+      dirName: "missing",
+      artifactCandidates: ["secret-contract-api.js"],
+    });
+    expect(loadBundledPublicArtifactMock).not.toHaveBeenCalledWith({
+      dirName: "missing",
+      artifactCandidates: ["contract-api.js"],
+    });
+    expect(loadPluginMetadataSnapshotMock).toHaveBeenCalledTimes(1);
+    expect(loadPluginMetadataSnapshotMock.mock.calls[0]?.[0]).toMatchObject({
+      config: {},
+      workspaceDir: expect.any(String),
+      allowWorkspaceScopedCurrent: true,
+    });
   });
 });

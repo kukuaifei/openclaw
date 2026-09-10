@@ -1,38 +1,34 @@
+// Regresses legacy provider config shapes accepted by config loading.
 import { describe, expect, it } from "vitest";
-import { readConfigFileSnapshot, validateConfigObject } from "./config.js";
-import { withTempHome, writeOpenClawConfig } from "./test-helpers.js";
+import { normalizeLegacyTalkConfig } from "../commands/doctor/shared/legacy-talk-config-normalizer.js";
+import type { OpenClawConfig } from "./types.js";
+import { OpenClawSchema } from "./zod-schema.js";
 
 describe("legacy provider-shaped config snapshots", () => {
-  it("accepts a string map of voice aliases while still flagging legacy talk config", async () => {
-    await withTempHome(async (home) => {
-      await writeOpenClawConfig(home, {
-        talk: {
-          voiceAliases: {
-            Clawd: "VoiceAlias1234567890",
-            Roger: "CwhRBWXzGAHq8TQ4Fs17",
-          },
+  it("preserves provider-owned legacy Talk fields for the provider doctor migration", () => {
+    const raw = {
+      talk: {
+        voiceAliases: {
+          Clawd: "VoiceAlias1234567890",
+          Roger: "CwhRBWXzGAHq8TQ4Fs17",
         },
-      });
+      },
+    };
+    const changes: string[] = [];
+    const migrated = normalizeLegacyTalkConfig(raw as unknown as OpenClawConfig, changes);
 
-      const snap = await readConfigFileSnapshot();
-
-      expect(snap.valid).toBe(true);
-      expect(snap.legacyIssues.some((issue) => issue.path === "talk")).toBe(true);
-      expect(snap.sourceConfig.talk?.providers?.elevenlabs?.voiceAliases).toEqual({
-        Clawd: "VoiceAlias1234567890",
-        Roger: "CwhRBWXzGAHq8TQ4Fs17",
-      });
-    });
+    expect(changes).toEqual([]);
+    expect(migrated).toEqual(raw);
   });
 
   it("rejects non-string voice alias values", () => {
-    const res = validateConfigObject({
+    const res = OpenClawSchema.safeParse({
       talk: {
         voiceAliases: {
           Clawd: 123,
         },
       },
     });
-    expect(res.ok).toBe(false);
+    expect(res.success).toBe(false);
   });
 });

@@ -1,31 +1,20 @@
-import { execFileSync } from "node:child_process";
-import { describe, expect, it } from "vitest";
+/** Tests core secret target registry queries without plugin discovery. */
+import { describe, expect, it, vi } from "vitest";
+import type { OpenClawConfig } from "../config/config.js";
 import {
   buildTalkTestProviderConfig,
   TALK_TEST_PROVIDER_API_KEY_PATH,
   TALK_TEST_PROVIDER_ID,
 } from "../test-utils/talk-test-provider.js";
+import {
+  discoverConfigSecretTargetsByIds,
+  resolveConfigSecretTargetByPath,
+  resolveSecretPlanTargetByPathCore,
+} from "./target-registry.js";
 
-function runTargetRegistrySnippet<T>(source: string): T {
-  const childEnv = { ...process.env };
-  delete childEnv.NODE_OPTIONS;
-  delete childEnv.VITEST;
-  delete childEnv.VITEST_MODE;
-  delete childEnv.VITEST_POOL_ID;
-  delete childEnv.VITEST_WORKER_ID;
-
-  const stdout = execFileSync(
-    process.execPath,
-    ["--import", "tsx", "--input-type=module", "-e", source],
-    {
-      cwd: process.cwd(),
-      encoding: "utf8",
-      env: childEnv,
-      maxBuffer: 10 * 1024 * 1024,
-    },
-  );
-  return JSON.parse(stdout) as T;
-}
+vi.mock("../plugins/plugin-metadata-snapshot.js", () => ({
+  resolvePluginMetadataSnapshot: () => ({ plugins: [] }),
+}));
 
 describe("secret target registry", () => {
   it("supports filtered discovery by target ids", () => {
@@ -33,19 +22,12 @@ describe("secret target registry", () => {
       ...buildTalkTestProviderConfig({ source: "env", provider: "default", id: "TALK_API_KEY" }),
       gateway: {
         remote: {
-          token: { source: "env", provider: "default", id: "REMOTE_TOKEN" },
+          token: { source: "env" as const, provider: "default", id: "REMOTE_TOKEN" },
         },
       },
-    };
+    } satisfies OpenClawConfig;
 
-    const targets = runTargetRegistrySnippet<
-      Array<{ entry?: { id?: string }; providerId?: string; path?: string }>
-    >(
-      `import { discoverConfigSecretTargetsByIds } from "./src/secrets/target-registry.ts";
-const config = ${JSON.stringify(config)};
-const result = discoverConfigSecretTargetsByIds(config, new Set(["talk.providers.*.apiKey"]));
-process.stdout.write(JSON.stringify(result));`,
-    );
+    const targets = discoverConfigSecretTargetsByIds(config, new Set(["talk.providers.*.apiKey"]));
 
     expect(targets).toHaveLength(1);
     expect(targets[0]?.entry?.id).toBe("talk.providers.*.apiKey");
@@ -53,28 +35,70 @@ process.stdout.write(JSON.stringify(result));`,
     expect(targets[0]?.path).toBe(TALK_TEST_PROVIDER_API_KEY_PATH);
   });
 
-  it("resolves config targets by exact path including sibling ref metadata", () => {
-    const target = runTargetRegistrySnippet<{
-      entry?: { id?: string };
-      refPathSegments?: string[];
-    } | null>(
-      `import { resolveConfigSecretTargetByPath } from "./src/secrets/target-registry.ts";
-const result = resolveConfigSecretTargetByPath(["channels", "googlechat", "serviceAccount"]);
-process.stdout.write(JSON.stringify(result));`,
+  it("preserves dotted provider header keys during discovery", () => {
+    const config = {
+      models: {
+        providers: {
+          openai: {
+            headers: {
+              "X.Trace": { source: "env", provider: "default", id: "TRACE_HEADER" },
+            },
+            request: {
+              headers: {
+                "X.Request.Trace": {
+                  source: "env",
+                  provider: "default",
+                  id: "REQUEST_TRACE_HEADER",
+                },
+              },
+            },
+          },
+        },
+      },
+    } as unknown as OpenClawConfig;
+
+    const targets = discoverConfigSecretTargetsByIds(
+      config,
+      new Set(["models.providers.*.headers.*", "models.providers.*.request.headers.*"]),
     );
 
-    expect(target).not.toBeNull();
-    expect(target?.entry?.id).toBe("channels.googlechat.serviceAccount");
-    expect(target?.refPathSegments).toEqual(["channels", "googlechat", "serviceAccountRef"]);
+    expect(targets.map(({ path }) => path).toSorted()).toEqual([
+      'models.providers.openai.headers["X.Trace"]',
+      'models.providers.openai.request.headers["X.Request.Trace"]',
+    ]);
+  });
+
+  it("resolves talk realtime provider api key targets", () => {
+    const target = resolveConfigSecretTargetByPath([
+      "talk",
+      "realtime",
+      "providers",
+      "openai",
+      "apiKey",
+    ]);
+
+    expect(target?.entry?.id).toBe("talk.realtime.providers.*.apiKey");
+    expect(target?.providerId).toBe("openai");
   });
 
   it("returns null when no config target path matches", () => {
-    const target = runTargetRegistrySnippet<unknown>(
-      `import { resolveConfigSecretTargetByPath } from "./src/secrets/target-registry.ts";
-const result = resolveConfigSecretTargetByPath(["gateway", "auth", "mode"]);
-process.stdout.write(JSON.stringify(result));`,
-    );
+    const target = resolveConfigSecretTargetByPath(["gateway", "auth", "mode"]);
 
     expect(target).toBeNull();
+  });
+
+  it("resolves plan targets by owning config document", () => {
+    const configTarget = resolveSecretPlanTargetByPathCore({
+      configFile: "openclaw.json",
+      pathSegments: ["models", "providers", "openai", "apiKey"],
+    });
+    const authProfileTarget = resolveSecretPlanTargetByPathCore({
+      configFile: "auth-profile-store",
+      pathSegments: ["profiles", "openai:default", "key"],
+    });
+
+    expect(configTarget?.entry.targetType).toBe("models.providers.apiKey");
+    expect(configTarget?.providerId).toBe("openai");
+    expect(authProfileTarget?.entry.targetType).toBe("auth-profiles.api_key.key");
   });
 });

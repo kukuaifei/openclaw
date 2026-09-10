@@ -1,3 +1,4 @@
+// Msteams tests cover graph messages.read plugin behavior.
 import { beforeAll, describe, expect, it } from "vitest";
 import type { OpenClawConfig } from "../runtime-api.js";
 import {
@@ -22,31 +23,7 @@ beforeAll(async () => {
 });
 
 describe("getMessageMSTeams", () => {
-  it("resolves user: target using graphChatId from store", async () => {
-    mockState.findPreferredDmByUserId.mockResolvedValue({
-      conversationId: "a:bot-framework-dm-id",
-      reference: { graphChatId: "19:graph-native-chat@thread.tacv2" },
-    });
-    mockState.fetchGraphJson.mockResolvedValue({
-      id: "msg-1",
-      body: { content: "From user DM" },
-      createdDateTime: "2026-03-23T12:00:00Z",
-    });
-
-    await getMessageMSTeams({
-      cfg: {} as OpenClawConfig,
-      to: "user:aad-object-id-123",
-      messageId: "msg-1",
-    });
-
-    expect(mockState.findPreferredDmByUserId).toHaveBeenCalledWith("aad-object-id-123");
-    expect(mockState.fetchGraphJson).toHaveBeenCalledWith({
-      token: TOKEN,
-      path: `/chats/${encodeURIComponent("19:graph-native-chat@thread.tacv2")}/messages/msg-1`,
-    });
-  });
-
-  it("falls back to conversationId when it starts with 19:", async () => {
+  it("resolves user targets whose stored conversation ID is Graph-native", async () => {
     mockState.findPreferredDmByUserId.mockResolvedValue({
       conversationId: "19:resolved-chat@thread.tacv2",
       reference: {},
@@ -81,7 +58,7 @@ describe("getMessageMSTeams", () => {
     ).rejects.toThrow("No conversation found for user:unknown-user");
   });
 
-  it("throws when user: target has Bot Framework ID and no graphChatId", async () => {
+  it("throws when user: target has an opaque Bot Framework ID", async () => {
     mockState.findPreferredDmByUserId.mockResolvedValue({
       conversationId: "a:bot-framework-dm-id",
       reference: {},
@@ -207,7 +184,66 @@ describe("listPinsMSTeams", () => {
       to: CHAT_ID,
     });
 
-    expect(result.pins).toEqual([]);
+    expect(result.pins).toStrictEqual([]);
+  });
+
+  it("follows @odata.nextLink pagination", async () => {
+    mockState.fetchGraphJson.mockResolvedValue({
+      value: [{ id: "pinned-1", message: { id: "msg-1", body: { content: "First page" } } }],
+      "@odata.nextLink":
+        "https://graph.microsoft.com/v1.0/chats/19%3Aabc%40thread.tacv2/pinnedMessages?$expand=message&$skiptoken=page2",
+    });
+    mockState.fetchGraphAbsoluteUrl.mockResolvedValue({
+      value: [{ id: "pinned-2", message: { id: "msg-2", body: { content: "Second page" } } }],
+    });
+
+    const result = await listPinsMSTeams({
+      cfg: {} as OpenClawConfig,
+      to: CHAT_ID,
+    });
+
+    expect(result.pins).toEqual([
+      { id: "pinned-1", pinnedMessageId: "pinned-1", messageId: "msg-1", text: "First page" },
+      { id: "pinned-2", pinnedMessageId: "pinned-2", messageId: "msg-2", text: "Second page" },
+    ]);
+    expect(mockState.fetchGraphAbsoluteUrl).toHaveBeenCalledWith({
+      token: TOKEN,
+      url: "https://graph.microsoft.com/v1.0/chats/19%3Aabc%40thread.tacv2/pinnedMessages?$expand=message&$skiptoken=page2",
+    });
+  });
+
+  it("stops paginating after max pages", async () => {
+    const makePageResponse = (pageNum: number) => ({
+      value: [
+        {
+          id: `pinned-${pageNum}`,
+          message: { id: `msg-${pageNum}`, body: { content: `Page ${pageNum}` } },
+        },
+      ],
+      "@odata.nextLink": `https://graph.microsoft.com/v1.0/next?page=${pageNum + 1}`,
+    });
+
+    mockState.fetchGraphJson.mockResolvedValue(makePageResponse(1));
+    for (let i = 2; i <= 10; i++) {
+      mockState.fetchGraphAbsoluteUrl.mockResolvedValueOnce(makePageResponse(i));
+    }
+
+    const result = await listPinsMSTeams({
+      cfg: {} as OpenClawConfig,
+      to: CHAT_ID,
+    });
+
+    expect(result.pins).toHaveLength(10);
+    expect(mockState.fetchGraphAbsoluteUrl).toHaveBeenCalledTimes(9);
+  });
+
+  it("throws for channel list-pins (not supported on Graph v1.0)", async () => {
+    await expect(
+      listPinsMSTeams({
+        cfg: {} as OpenClawConfig,
+        to: CHANNEL_TO,
+      }),
+    ).rejects.toThrow("not supported for channels");
   });
 });
 
@@ -232,6 +268,8 @@ describe("listReactionsMSTeams", () => {
     expect(result.reactions).toEqual([
       {
         reactionType: "like",
+        name: "like",
+        emoji: "\u{1F44D}",
         count: 2,
         users: [
           { id: "u1", displayName: "Alice" },
@@ -240,6 +278,8 @@ describe("listReactionsMSTeams", () => {
       },
       {
         reactionType: "heart",
+        name: "heart",
+        emoji: "\u2764\uFE0F",
         count: 1,
         users: [{ id: "u1", displayName: "Alice" }],
       },
@@ -258,7 +298,44 @@ describe("listReactionsMSTeams", () => {
       messageId: "msg-1",
     });
 
-    expect(result.reactions).toEqual([]);
+    expect(result.reactions).toStrictEqual([]);
+  });
+
+  it("counts reactions from users without an ID", async () => {
+    mockState.fetchGraphJson.mockResolvedValue({
+      id: "msg-1",
+      body: { content: "Hello" },
+      reactions: [
+        { reactionType: "like", user: { id: "u1", displayName: "Alice" } },
+        { reactionType: "like", user: { displayName: "Deleted User" } },
+        { reactionType: "like", user: undefined },
+        { reactionType: "like" },
+        { reactionType: "heart", user: { id: "u2", displayName: "Bob" } },
+      ],
+    });
+
+    const result = await listReactionsMSTeams({
+      cfg: {} as OpenClawConfig,
+      to: CHAT_ID,
+      messageId: "msg-1",
+    });
+
+    expect(result.reactions).toEqual([
+      {
+        reactionType: "like",
+        name: "like",
+        emoji: "\u{1F44D}",
+        count: 4,
+        users: [{ id: "u1", displayName: "Alice" }],
+      },
+      {
+        reactionType: "heart",
+        name: "heart",
+        emoji: "\u2764\uFE0F",
+        count: 1,
+        users: [{ id: "u2", displayName: "Bob" }],
+      },
+    ]);
   });
 
   it("fetches from channel path for channel targets", async () => {
@@ -275,7 +352,13 @@ describe("listReactionsMSTeams", () => {
     });
 
     expect(result.reactions).toEqual([
-      { reactionType: "surprised", count: 1, users: [{ id: "u3", displayName: "Carol" }] },
+      {
+        reactionType: "surprised",
+        name: "surprised",
+        emoji: "\u{1F62E}",
+        count: 1,
+        users: [{ id: "u3", displayName: "Carol" }],
+      },
     ]);
     expect(mockState.fetchGraphJson).toHaveBeenCalledWith({
       token: TOKEN,

@@ -1,10 +1,7 @@
-import type { TelegramGroupConfig } from "openclaw/plugin-sdk/config-runtime";
-import { normalizeOptionalString } from "openclaw/plugin-sdk/text-runtime";
-export type {
-  AuditTelegramGroupMembershipParams,
-  TelegramGroupMembershipAudit,
-  TelegramGroupMembershipAuditEntry,
-} from "./audit.types.js";
+// Telegram plugin module implements audit behavior.
+import type { TelegramGroupConfig } from "openclaw/plugin-sdk/config-contracts";
+import { createLazyRuntimeModule } from "openclaw/plugin-sdk/lazy-runtime";
+import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type {
   AuditTelegramGroupMembershipParams,
   TelegramGroupMembershipAudit,
@@ -21,7 +18,7 @@ export function collectTelegramUnmentionedGroupIds(
     };
   }
   const hasWildcardUnmentionedGroups =
-    Boolean(groups["*"]?.requireMention === false) && groups["*"]?.enabled !== false;
+    groups["*"]?.requireMention === false && groups["*"]?.enabled !== false;
   const groupIds: string[] = [];
   let unresolvedGroups = 0;
   for (const [key, value] of Object.entries(groups)) {
@@ -37,7 +34,7 @@ export function collectTelegramUnmentionedGroupIds(
     if (value.requireMention !== false) {
       continue;
     }
-    const id = normalizeOptionalString(String(key)) ?? "";
+    const id = normalizeOptionalString(key) ?? "";
     if (!id) {
       continue;
     }
@@ -51,13 +48,9 @@ export function collectTelegramUnmentionedGroupIds(
   return { groupIds, unresolvedGroups, hasWildcardUnmentionedGroups };
 }
 
-let auditMembershipRuntimePromise: Promise<typeof import("./audit-membership-runtime.js")> | null =
-  null;
-
-function loadAuditMembershipRuntime() {
-  auditMembershipRuntimePromise ??= import("./audit-membership-runtime.js");
-  return auditMembershipRuntimePromise;
-}
+const loadAuditMembershipRuntime = createLazyRuntimeModule(
+  () => import("./audit-membership-runtime.js"),
+);
 
 export async function auditTelegramGroupMembership(
   params: AuditTelegramGroupMembershipParams,
